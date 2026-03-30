@@ -19,6 +19,7 @@ declare global {
 export default function App() {
   const [localAccount, setLocalAccount] = useState<any>(null);
   const [claims, setClaims] = useState<Claim[]>([]);
+  const [pendingClaims, setPendingClaims] = useState<Claim[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [newClaimContent, setNewClaimContent] = useState('');
@@ -75,7 +76,21 @@ export default function App() {
   }, [fetchClaims]);
 
   const pollClaimStatus = async (claimId: string) => {
+    let attempts = 0;
+    const maxAttempts = 40; // ~2 minutes at 3s interval
+    
     const interval = setInterval(async () => {
+      attempts++;
+      if (attempts > maxAttempts) {
+        console.error('Polling timed out for claim:', claimId);
+        clearInterval(interval);
+        setSubmitting(false);
+        setPendingClaims(prev => prev.filter(c => c.id !== claimId));
+        setError('Verification is taking longer than expected. Please check back in a few minutes.');
+        fetchClaims();
+        return;
+      }
+
       try {
         const client = getClient();
         const claim = await client.readContract({
@@ -83,9 +98,14 @@ export default function App() {
           functionName: 'get_claim',
           args: [claimId]
         }) as Claim;
+        
+        console.log(`Polling claim ${claimId} (attempt ${attempts}):`, claim);
+        
         if (claim && claim.is_checked) {
           clearInterval(interval);
           setSubmitting(false);
+          // Remove from pending and refresh main list
+          setPendingClaims(prev => prev.filter(c => c.id !== claimId));
           fetchClaims();
         }
       } catch (err) {
@@ -98,10 +118,12 @@ export default function App() {
     e.preventDefault();
     if (!localAccount || !newClaimContent.trim()) return;
 
+    const contentToSubmit = newClaimContent.trim();
+
     try {
       setSubmitting(true);
       setError(null);
-      console.log('Submitting claim:', newClaimContent);
+      console.log('Submitting claim:', contentToSubmit);
       const client = getClient();
       
       // For write operations, we use writeContract
@@ -109,7 +131,7 @@ export default function App() {
       const txHash = await client.writeContract({
         address: CONTRACT_ADDRESS as `0x${string}`,
         functionName: 'submit_and_verify',
-        args: [newClaimContent],
+        args: [contentToSubmit],
         value: 0n
       });
       
@@ -124,16 +146,26 @@ export default function App() {
       });
       console.log('Transaction receipt received:', receipt);
       
-      const claimId = receipt.result as string;
+      // Convert to string safely (could be bigint)
+      const claimId = receipt.result !== undefined ? String(receipt.result) : null;
       console.log('Extracted claimId:', claimId);
       
-      setNewClaimContent('');
-      
       if (claimId) {
+        // Add to local pending state so it doesn't disappear
+        const pendingClaim: Claim = {
+          id: claimId,
+          submitter: localAccount.address,
+          content: contentToSubmit,
+          is_checked: false,
+          verdict: null
+        };
+        setPendingClaims(prev => [pendingClaim, ...prev]);
+        setNewClaimContent('');
         pollClaimStatus(claimId);
       } else {
         console.warn('No claimId returned in receipt.result, refreshing list');
         setSubmitting(false);
+        setNewClaimContent('');
         fetchClaims();
       }
     } catch (err: any) {
@@ -282,12 +314,38 @@ export default function App() {
               <Loader2 className="w-8 h-8 text-emerald-500 animate-spin" />
               <p className="text-gray-500 animate-pulse">Loading claims from GenLayer...</p>
             </div>
-          ) : claims.length === 0 ? (
+          ) : (claims.length === 0 && pendingClaims.length === 0) ? (
             <div className="text-center py-20 border border-dashed border-white/10 rounded-3xl">
               <p className="text-gray-500">No claims verified yet. Be the first!</p>
             </div>
           ) : (
             <div className="grid gap-4">
+              {/* Show pending claims first */}
+              {pendingClaims.map((claim) => (
+                <motion.div
+                  key={`pending-${claim.id}`}
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  className="group bg-white/5 border border-emerald-500/30 rounded-2xl p-6 relative overflow-hidden"
+                >
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div className="flex-1">
+                      <p className="text-lg font-medium line-clamp-1 mb-2 text-emerald-400/80">
+                        {claim.content}
+                      </p>
+                      <div className="flex items-center gap-3">
+                        <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold border text-emerald-400 bg-emerald-400/10 border-emerald-400/20">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          AI Verification in Progress...
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/5 to-transparent pointer-events-none" />
+                </motion.div>
+              ))}
+
+              {/* Show verified claims */}
               {claims.map((claim) => (
                 <motion.div
                   key={claim.id}
