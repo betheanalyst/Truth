@@ -4,8 +4,8 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { createClient, chains } from 'genlayer-js';
-import { Search, ShieldCheck, AlertCircle, ExternalLink, Loader2, Wallet, CheckCircle2, XCircle, HelpCircle, ChevronRight } from 'lucide-react';
+import { createClient, chains, createAccount, generatePrivateKey } from 'genlayer-js';
+import { Search, ShieldCheck, AlertCircle, ExternalLink, Loader2, Wallet, CheckCircle2, XCircle, HelpCircle, ChevronRight, RefreshCw, Copy } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { CONTRACT_ADDRESS, RPC_URL } from './lib/genlayer';
 import { Claim } from './types';
@@ -17,7 +17,8 @@ declare global {
 }
 
 export default function App() {
-  const [account, setAccount] = useState<string | null>(null);
+  const [localAccount, setLocalAccount] = useState<any>(null);
+  const [balance, setBalance] = useState<string>('0');
   const [claims, setClaims] = useState<Claim[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -25,20 +26,46 @@ export default function App() {
   const [selectedClaim, setSelectedClaim] = useState<Claim | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Initialize Local Wallet on mount
+  useEffect(() => {
+    let pk = localStorage.getItem('truthlayer_pk') as `0x${string}`;
+    if (!pk) {
+      pk = generatePrivateKey();
+      localStorage.setItem('truthlayer_pk', pk);
+    }
+    try {
+      const account = createAccount(pk);
+      setLocalAccount(account);
+    } catch (err) {
+      console.error('Failed to initialize local account:', err);
+      // Fallback: generate new one if stored one is invalid
+      const newPk = generatePrivateKey();
+      localStorage.setItem('truthlayer_pk', newPk);
+      setLocalAccount(createAccount(newPk));
+    }
+  }, []);
+
   // Initialize client
-  const getClient = useCallback((withAccount = false) => {
-    const config: any = {
+  const getClient = useCallback(() => {
+    return createClient({
       chain: chains.studionet,
       endpoint: RPC_URL,
-    };
-    if (withAccount && window.ethereum) {
-      config.provider = window.ethereum;
-      if (account) {
-        config.account = account as `0x${string}`;
-      }
+      account: localAccount,
+    });
+  }, [localAccount]);
+
+  const fetchBalance = useCallback(async () => {
+    if (!localAccount) return;
+    try {
+      const client = getClient();
+      const b = await client.getBalance({ address: localAccount.address });
+      // Simple format: Convert bigint wei to GEN
+      const formatted = (Number(b) / 1e18).toFixed(4);
+      setBalance(formatted);
+    } catch (err) {
+      console.error('Balance error:', err);
     }
-    return createClient(config);
-  }, [account]);
+  }, [localAccount, getClient]);
 
   const fetchClaims = useCallback(async () => {
     try {
@@ -59,30 +86,16 @@ export default function App() {
 
   useEffect(() => {
     fetchClaims();
-  }, [fetchClaims]);
-
-  const connectWallet = async () => {
-    if (!window.ethereum) {
-      setError('Please install a wallet like MetaMask.');
-      return;
+    if (localAccount) {
+      fetchBalance();
     }
-    try {
-      setLoading(true);
-      setError(null);
-      const client = getClient(true);
-      
-      // Connect to GenLayer Snap
-      await client.connect();
-      
-      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-      if (accounts.length > 0) {
-        setAccount(accounts[0]);
-      }
-    } catch (err: any) {
-      console.error('Wallet connection error:', err);
-      setError(`Could not connect wallet: ${err.message || 'Unknown error'}. Make sure GenLayer Snap is installed.`);
-    } finally {
-      setLoading(false);
+  }, [fetchClaims, fetchBalance, localAccount]);
+
+  const resetWallet = () => {
+    if (window.confirm('This will generate a new wallet. You will lose access to your current local account. Continue?')) {
+      const pk = generatePrivateKey();
+      localStorage.setItem('truthlayer_pk', pk);
+      setLocalAccount(createAccount(pk));
     }
   };
 
@@ -108,17 +121,19 @@ export default function App() {
 
   const handleSubmit = async (e: any) => {
     e.preventDefault();
-    if (!account || !newClaimContent.trim()) return;
+    if (!localAccount || !newClaimContent.trim()) return;
 
     try {
       setSubmitting(true);
       setError(null);
       console.log('Submitting claim:', newClaimContent);
-      const client = getClient(true);
+      const client = getClient();
       
-      // Ensure connected to Snap
-      console.log('Connecting to GenLayer Snap...');
-      await client.connect();
+      // Check balance first
+      const b = await client.getBalance({ address: localAccount.address });
+      if (b === 0n) {
+        throw new Error('Insufficient balance. Please get some GEN from the faucet.');
+      }
       
       // For write operations, we use writeContract
       console.log('Sending write transaction...');
@@ -140,16 +155,15 @@ export default function App() {
       });
       console.log('Transaction receipt received:', receipt);
       
-      // In GenLayer, the result of the function call is often in the receipt
-      // If the contract returns the claimId, it should be in receipt.result
       const claimId = receipt.result as string;
       console.log('Extracted claimId:', claimId);
       
       setNewClaimContent('');
+      fetchBalance(); // Update balance after spend
+      
       if (claimId) {
         pollClaimStatus(claimId);
       } else {
-        // Fallback if claimId is not directly returned
         console.warn('No claimId returned in receipt.result, refreshing list');
         setSubmitting(false);
         fetchClaims();
@@ -159,9 +173,6 @@ export default function App() {
       let errorMessage = 'Failed to submit claim.';
       if (err.message) {
         errorMessage += ` ${err.message}`;
-      }
-      if (err.data?.message) {
-        errorMessage += ` (${err.data.message})`;
       }
       setError(errorMessage);
       setSubmitting(false);
@@ -202,15 +213,35 @@ export default function App() {
             </span>
           </div>
 
-          <button
-            onClick={connectWallet}
-            className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 transition-all active:scale-95"
-          >
-            <Wallet className="w-4 h-4 text-emerald-400" />
-            <span className="text-sm font-medium">
-              {account ? shortenAddress(account) : 'Connect Wallet'}
-            </span>
-          </button>
+          <div className="flex items-center gap-4">
+            {localAccount && (
+              <div className="hidden sm:flex flex-col items-end">
+                <div className="flex items-center gap-2 text-xs font-mono text-gray-400">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                  {shortenAddress(localAccount.address)}
+                  <button 
+                    onClick={() => {
+                      navigator.clipboard.writeText(localAccount.address);
+                    }}
+                    className="hover:text-emerald-400 transition-colors"
+                  >
+                    <Copy className="w-3 h-3" />
+                  </button>
+                </div>
+                <span className="text-sm font-bold text-emerald-400">
+                  {balance} GEN
+                </span>
+              </div>
+            )}
+
+            <button
+              onClick={resetWallet}
+              title="Reset Local Wallet"
+              className="p-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 transition-all active:scale-95"
+            >
+              <RefreshCw className="w-4 h-4 text-gray-400" />
+            </button>
+          </div>
         </div>
       </header>
 
@@ -241,12 +272,12 @@ export default function App() {
                 onChange={(e) => setNewClaimContent(e.target.value)}
                 placeholder="Paste a claim or news headline to verify..."
                 className="w-full bg-white/5 border border-white/10 rounded-2xl px-6 py-5 pr-36 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 transition-all placeholder:text-gray-600"
-                disabled={!account || submitting}
+                disabled={!localAccount || submitting}
               />
               <div className="absolute right-2 top-2 bottom-2 flex items-center">
                 <button
                   type="submit"
-                  disabled={!account || submitting || !newClaimContent.trim()}
+                  disabled={!localAccount || submitting || !newClaimContent.trim()}
                   className="h-full px-6 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-bold transition-all disabled:opacity-50 disabled:hover:bg-emerald-500 flex items-center gap-2"
                 >
                   {submitting ? (
@@ -263,11 +294,22 @@ export default function App() {
                 </button>
               </div>
             </div>
-            {!account && (
-              <p className="mt-3 text-sm text-amber-400/80 flex items-center justify-center gap-1">
-                <AlertCircle className="w-4 h-4" />
-                Please connect your wallet to verify claims
-              </p>
+            {balance === '0.0000' && !submitting && (
+              <div className="mt-4 p-4 rounded-2xl bg-amber-400/10 border border-amber-400/20 text-amber-400 text-sm flex flex-col items-center gap-2">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4" />
+                  <span>Your local wallet has 0 GEN. You need tokens to verify claims.</span>
+                </div>
+                <a 
+                  href="https://studio.genlayer.com/faucet" 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="px-4 py-1.5 rounded-lg bg-amber-400 text-black font-bold hover:bg-amber-300 transition-all flex items-center gap-2"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  Get Free GEN from Faucet
+                </a>
+              </div>
             )}
             {error && (
               <p className="mt-3 text-sm text-rose-400 flex items-center justify-center gap-1">
