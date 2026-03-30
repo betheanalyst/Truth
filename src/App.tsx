@@ -5,7 +5,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { createClient, chains, createAccount, generatePrivateKey } from 'genlayer-js';
-import { Search, ShieldCheck, AlertCircle, ExternalLink, Loader2, Wallet, CheckCircle2, XCircle, HelpCircle, ChevronRight, RefreshCw, Copy } from 'lucide-react';
+import { Search, ShieldCheck, AlertCircle, ExternalLink, Loader2, Wallet, CheckCircle2, XCircle, HelpCircle, ChevronRight, Copy } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { CONTRACT_ADDRESS, RPC_URL } from './lib/genlayer';
 import { Claim } from './types';
@@ -18,7 +18,6 @@ declare global {
 
 export default function App() {
   const [localAccount, setLocalAccount] = useState<any>(null);
-  const [balance, setBalance] = useState<string>('0');
   const [claims, setClaims] = useState<Claim[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -54,19 +53,6 @@ export default function App() {
     });
   }, [localAccount]);
 
-  const fetchBalance = useCallback(async () => {
-    if (!localAccount) return;
-    try {
-      const client = getClient();
-      const b = await client.getBalance({ address: localAccount.address });
-      // Simple format: Convert bigint wei to GEN
-      const formatted = (Number(b) / 1e18).toFixed(4);
-      setBalance(formatted);
-    } catch (err) {
-      console.error('Balance error:', err);
-    }
-  }, [localAccount, getClient]);
-
   const fetchClaims = useCallback(async () => {
     try {
       setLoading(true);
@@ -86,18 +72,7 @@ export default function App() {
 
   useEffect(() => {
     fetchClaims();
-    if (localAccount) {
-      fetchBalance();
-    }
-  }, [fetchClaims, fetchBalance, localAccount]);
-
-  const resetWallet = () => {
-    if (window.confirm('This will generate a new wallet. You will lose access to your current local account. Continue?')) {
-      const pk = generatePrivateKey();
-      localStorage.setItem('truthlayer_pk', pk);
-      setLocalAccount(createAccount(pk));
-    }
-  };
+  }, [fetchClaims]);
 
   const pollClaimStatus = async (claimId: string) => {
     const interval = setInterval(async () => {
@@ -129,12 +104,6 @@ export default function App() {
       console.log('Submitting claim:', newClaimContent);
       const client = getClient();
       
-      // Check balance first
-      const b = await client.getBalance({ address: localAccount.address });
-      if (b === 0n) {
-        throw new Error('Insufficient balance. Please get some GEN from the faucet.');
-      }
-      
       // For write operations, we use writeContract
       console.log('Sending write transaction...');
       const txHash = await client.writeContract({
@@ -159,7 +128,6 @@ export default function App() {
       console.log('Extracted claimId:', claimId);
       
       setNewClaimContent('');
-      fetchBalance(); // Update balance after spend
       
       if (claimId) {
         pollClaimStatus(claimId);
@@ -215,7 +183,7 @@ export default function App() {
 
           <div className="flex items-center gap-4">
             {localAccount && (
-              <div className="hidden sm:flex flex-col items-end">
+              <div className="flex flex-col items-end">
                 <div className="flex items-center gap-2 text-xs font-mono text-gray-400">
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                   {shortenAddress(localAccount.address)}
@@ -228,19 +196,8 @@ export default function App() {
                     <Copy className="w-3 h-3" />
                   </button>
                 </div>
-                <span className="text-sm font-bold text-emerald-400">
-                  {balance} GEN
-                </span>
               </div>
             )}
-
-            <button
-              onClick={resetWallet}
-              title="Reset Local Wallet"
-              className="p-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 transition-all active:scale-95"
-            >
-              <RefreshCw className="w-4 h-4 text-gray-400" />
-            </button>
           </div>
         </div>
       </header>
@@ -294,23 +251,6 @@ export default function App() {
                 </button>
               </div>
             </div>
-            {balance === '0.0000' && !submitting && (
-              <div className="mt-4 p-4 rounded-2xl bg-amber-400/10 border border-amber-400/20 text-amber-400 text-sm flex flex-col items-center gap-2">
-                <div className="flex items-center gap-2">
-                  <AlertCircle className="w-4 h-4" />
-                  <span>Your local wallet has 0 GEN. You need tokens to verify claims.</span>
-                </div>
-                <a 
-                  href="https://studio.genlayer.com/faucet" 
-                  target="_blank" 
-                  rel="noopener noreferrer"
-                  className="px-4 py-1.5 rounded-lg bg-amber-400 text-black font-bold hover:bg-amber-300 transition-all flex items-center gap-2"
-                >
-                  <ExternalLink className="w-3 h-3" />
-                  Get Free GEN from Faucet
-                </a>
-              </div>
-            )}
             {error && (
               <p className="mt-3 text-sm text-rose-400 flex items-center justify-center gap-1">
                 <AlertCircle className="w-4 h-4" />
