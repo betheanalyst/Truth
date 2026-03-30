@@ -58,14 +58,20 @@ export default function App() {
     try {
       setLoading(true);
       const client = getClient();
+      console.log('Fetching claims from contract...');
       const result = await client.readContract({
         address: CONTRACT_ADDRESS as `0x${string}`,
         functionName: 'get_claims_paginated',
         args: [0, 10]
       });
+      console.log('Fetch result:', result);
       setClaims((result as Claim[]) || []);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Fetch claims error:', err);
+      // If it's a "contract state" error, it might be transient or gas related
+      if (err.message && err.message.includes('state')) {
+        setError('Note: The GenLayer node is currently having trouble reading the contract state. Your claims are safe on-chain, but might not display here immediately.');
+      }
     } finally {
       setLoading(false);
     }
@@ -112,17 +118,38 @@ export default function App() {
       console.log('Transaction receipt received:', receipt);
       setSubmissionStatus('finalizing');
 
-      if (receipt.status === 'success' || (receipt as any).status === 1) {
-        console.log('Transaction successful!');
+      // More resilient success check
+      const isSuccess = 
+        receipt.status === 'success' || 
+        (receipt as any).status === 1 || 
+        (receipt as any).status === 'SUCCESS' ||
+        (receipt as any).status === '0x1';
+
+      if (isSuccess) {
+        console.log('Transaction confirmed as successful!');
+        setNewClaimContent('');
+        // Wait a bit before fetching to allow indexing
+        setTimeout(() => fetchClaims(), 2000);
+      } else {
+        console.warn('Transaction status check failed, but receipt was received. Status:', receipt.status);
+        // If we have a receipt at all, let's try to fetch anyway instead of throwing immediately
+        // unless it's explicitly a failure
+        if (receipt.status === 'reverted' || (receipt as any).status === 0 || (receipt as any).status === 'FAILURE') {
+          throw new Error('Transaction explicitly reverted on-chain. The AI models might have failed to reach consensus.');
+        }
+        
+        console.log('Proceeding despite ambiguous status...');
         setNewClaimContent('');
         await fetchClaims();
-      } else {
-        throw new Error('Transaction failed on-chain. The AI models might have failed to reach consensus or the contract reverted.');
       }
     } catch (err: any) {
       console.error('Submission error details:', err);
       let errorMessage = 'Failed to verify claim.';
-      if (err.message) {
+      
+      // Check if it's a timeout but the tx might still be processing
+      if (err.message && err.message.includes('timeout')) {
+        errorMessage = 'Verification is taking longer than expected. The transaction is likely still processing on-chain. Please refresh in a minute.';
+      } else if (err.message) {
         if (err.message.includes('User rejected')) {
           errorMessage = 'Transaction was rejected.';
         } else {
@@ -260,9 +287,11 @@ export default function App() {
             </h2>
             <button 
               onClick={fetchClaims}
-              className="text-sm text-gray-500 hover:text-emerald-400 transition-colors"
+              disabled={loading}
+              className="flex items-center gap-2 text-sm text-gray-500 hover:text-emerald-400 transition-colors disabled:opacity-50"
             >
-              Refresh
+              <Loader2 className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
+              {loading ? 'Refreshing...' : 'Refresh List'}
             </button>
           </div>
 
@@ -296,6 +325,15 @@ export default function App() {
                           {submissionStatus === 'consensus' && 'AI Consensus (30-60s)...'}
                           {submissionStatus === 'finalizing' && 'Updating Ledger...'}
                         </span>
+                        <a 
+                          href={`https://explorer-studio.genlayer.com/transactions`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-gray-500 hover:text-emerald-400 flex items-center gap-1 transition-colors"
+                        >
+                          <ExternalLink className="w-3 h-3" />
+                          Check Explorer
+                        </a>
                       </div>
                     </div>
                   </div>
@@ -342,6 +380,46 @@ export default function App() {
           )}
         </section>
       </main>
+      
+      {/* Footer */}
+      <footer className="max-w-4xl mx-auto px-4 py-12 border-t border-white/5">
+        <div className="flex flex-col md:flex-row items-center justify-between gap-6">
+          <div className="flex items-center gap-4">
+            <div className="text-xs text-gray-500">
+              <p className="uppercase tracking-widest font-bold mb-1 opacity-50">Contract Address</p>
+              <div className="flex items-center gap-2 font-mono">
+                {CONTRACT_ADDRESS}
+                <button 
+                  onClick={() => navigator.clipboard.writeText(CONTRACT_ADDRESS)}
+                  className="hover:text-emerald-400 transition-colors"
+                >
+                  <Copy className="w-3 h-3" />
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-6">
+            <a 
+              href="https://studio.genlayer.com" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="text-xs text-gray-500 hover:text-emerald-400 flex items-center gap-1 transition-colors"
+            >
+              GenLayer Studio
+              <ExternalLink className="w-3 h-3" />
+            </a>
+            <a 
+              href="https://explorer-studio.genlayer.com" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="text-xs text-gray-500 hover:text-emerald-400 flex items-center gap-1 transition-colors"
+            >
+              Explorer
+              <ExternalLink className="w-3 h-3" />
+            </a>
+          </div>
+        </div>
+      </footer>
 
       {/* Detail Modal */}
       <AnimatePresence>
