@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { createClient } from 'genlayer-js';
+import { createClient, chains } from 'genlayer-js';
 import { Search, ShieldCheck, AlertCircle, ExternalLink, Loader2, Wallet, CheckCircle2, XCircle, HelpCircle, ChevronRight } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { CONTRACT_ADDRESS, RPC_URL } from './lib/genlayer';
@@ -27,11 +27,18 @@ export default function App() {
 
   // Initialize client
   const getClient = useCallback((withAccount = false) => {
-    return createClient({
+    const config: any = {
+      chain: chains.studionet,
       endpoint: RPC_URL,
-      provider: withAccount ? window.ethereum : undefined,
-    });
-  }, []);
+    };
+    if (withAccount && window.ethereum) {
+      config.provider = window.ethereum;
+      if (account) {
+        config.account = account as `0x${string}`;
+      }
+    }
+    return createClient(config);
+  }, [account]);
 
   const fetchClaims = useCallback(async () => {
     try {
@@ -60,13 +67,22 @@ export default function App() {
       return;
     }
     try {
+      setLoading(true);
+      setError(null);
+      const client = getClient(true);
+      
+      // Connect to GenLayer Snap
+      await client.connect();
+      
       const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
       if (accounts.length > 0) {
         setAccount(accounts[0]);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Wallet connection error:', err);
-      setError('Could not connect wallet.');
+      setError(`Could not connect wallet: ${err.message || 'Unknown error'}. Make sure GenLayer Snap is installed.`);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -97,9 +113,15 @@ export default function App() {
     try {
       setSubmitting(true);
       setError(null);
+      console.log('Submitting claim:', newClaimContent);
       const client = getClient(true);
       
+      // Ensure connected to Snap
+      console.log('Connecting to GenLayer Snap...');
+      await client.connect();
+      
       // For write operations, we use writeContract
+      console.log('Sending write transaction...');
       const txHash = await client.writeContract({
         address: CONTRACT_ADDRESS as `0x${string}`,
         functionName: 'submit_and_verify',
@@ -107,24 +129,41 @@ export default function App() {
         value: 0n
       });
       
+      console.log('Transaction hash received:', txHash);
+      
       // Wait for transaction receipt to get the claimId
-      const receipt = await client.waitForTransactionReceipt({ hash: txHash });
+      console.log('Waiting for transaction receipt...');
+      const receipt = await client.waitForTransactionReceipt({ 
+        hash: txHash,
+        interval: 2000,
+        retries: 30
+      });
+      console.log('Transaction receipt received:', receipt);
       
       // In GenLayer, the result of the function call is often in the receipt
       // If the contract returns the claimId, it should be in receipt.result
       const claimId = receipt.result as string;
+      console.log('Extracted claimId:', claimId);
       
       setNewClaimContent('');
       if (claimId) {
         pollClaimStatus(claimId);
       } else {
         // Fallback if claimId is not directly returned
+        console.warn('No claimId returned in receipt.result, refreshing list');
         setSubmitting(false);
         fetchClaims();
       }
-    } catch (err) {
-      console.error('Submission error:', err);
-      setError('Failed to submit claim.');
+    } catch (err: any) {
+      console.error('Submission error details:', err);
+      let errorMessage = 'Failed to submit claim.';
+      if (err.message) {
+        errorMessage += ` ${err.message}`;
+      }
+      if (err.data?.message) {
+        errorMessage += ` (${err.data.message})`;
+      }
+      setError(errorMessage);
       setSubmitting(false);
     }
   };
