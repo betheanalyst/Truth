@@ -76,7 +76,7 @@ export default function App() {
       // Clear pending claims that have now been indexed
       if (fetchedClaims.length > 0) {
         setPendingClaims(prev => prev.filter(p => 
-          !fetchedClaims.some(c => c.content === p.content)
+          !fetchedClaims.some(c => c.content.toLowerCase().trim() === p.content?.toLowerCase()?.trim())
         ));
       }
     } catch (err: any) {
@@ -108,16 +108,17 @@ export default function App() {
       setError(null);
       
       // Add to local pending list immediately
-      setPendingClaims(prev => [{
+      const newPendingClaim = {
         id: tempId,
         content: contentToSubmit,
         submitter: localAccount.address,
         is_checked: false,
         verdict: null,
-        txHash: '' // Will update once we have it
-      }, ...prev]);
+        txHash: ''
+      };
+      setPendingClaims(prev => [newPendingClaim, ...prev]);
 
-      console.log('Submitting claim:', contentToSubmit);
+      console.log('Submitting claim to GenLayer:', contentToSubmit);
       const client = getClient();
       
       // 1. Send the transaction
@@ -129,37 +130,41 @@ export default function App() {
       });
       
       console.log('Transaction hash received:', txHash);
-      setPendingClaims(prev => prev.map(c => c.id === tempId ? { ...c, txHash } : c));
+      // Ensure we have a string hash
+      const finalHash = typeof txHash === 'string' ? txHash : (txHash as any).hash || String(txHash);
+      
+      setPendingClaims(prev => prev.map(c => c.id === tempId ? { ...c, txHash: finalHash } : c));
       setSubmissionStatus('consensus');
       
       // 2. Wait for transaction receipt
-      console.log('Waiting for AI consensus and transaction receipt...');
+      console.log('Waiting for AI consensus and transaction receipt for hash:', finalHash);
       const receipt = await client.waitForTransactionReceipt({ 
-        hash: txHash,
-        interval: 3000,
-        retries: 80 // Increased to 4 minutes
+        hash: finalHash as `0x${string}`,
+        interval: 5000,
+        retries: 100 // Increased to ~8 minutes for slow AI consensus
       });
       
-      console.log('Transaction receipt received:', receipt);
+      console.log('Full Transaction receipt received:', JSON.stringify(receipt, null, 2));
       setSubmissionStatus('finalizing');
 
       // More resilient success check
+      const status = String(receipt.status || (receipt as any).status || '').toLowerCase();
       const isSuccess = 
-        receipt.status === 'success' || 
-        (receipt as any).status === 1 || 
-        (receipt as any).status === 'SUCCESS' ||
-        (receipt as any).status === '0x1';
+        status === 'success' || 
+        status === '1' || 
+        status === '0x1' ||
+        status === 'confirmed';
 
-      if (isSuccess) {
-        console.log('Transaction confirmed as successful!');
+      if (isSuccess || receipt.blockNumber) {
+        console.log('Transaction confirmed as successful (or has block number)!');
         setNewClaimContent('');
-        // We don't clear pending here anymore; fetchClaims will handle it
-        // by comparing IDs, or we'll clear it after a long timeout
+        // Trigger multiple fetches to catch indexing
         setTimeout(() => fetchClaims(), 2000);
-        setTimeout(() => fetchClaims(), 10000); // Second attempt
+        setTimeout(() => fetchClaims(), 10000);
+        setTimeout(() => fetchClaims(), 30000);
       } else {
         console.warn('Transaction status check failed, but receipt was received. Status:', receipt.status);
-        if (receipt.status === 'reverted' || (receipt as any).status === 0 || (receipt as any).status === 'FAILURE') {
+        if (status === 'reverted' || status === '0' || status === '0x0' || status === 'failure') {
           throw new Error('Transaction explicitly reverted on-chain. The AI models might have failed to reach consensus.');
         }
         
@@ -169,16 +174,16 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Submission error details:', err);
-      // Only remove if it's a hard rejection/revert
-      if (err.message?.includes('rejected') || err.message?.includes('reverted')) {
-        setPendingClaims([]);
+      
+      // Only remove from pending if it's a user rejection or a hard revert
+      if (err.message?.toLowerCase().includes('rejected') || err.message?.toLowerCase().includes('revert')) {
+        setPendingClaims(prev => prev.filter(c => c.id !== tempId));
       }
       
       let errorMessage = 'Failed to verify claim.';
       
-      // Check if it's a timeout but the tx might still be processing
       if (err.message && err.message.includes('timeout')) {
-        errorMessage = 'Verification is taking longer than expected. The transaction is likely still processing on-chain. Please refresh in a minute.';
+        errorMessage = 'Verification is taking longer than expected. The AI models are still processing. Your claim will appear in the list once consensus is reached. Check the explorer for updates.';
       } else if (err.message) {
         if (err.message.includes('User rejected')) {
           errorMessage = 'Transaction was rejected.';
