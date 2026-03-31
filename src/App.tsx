@@ -62,22 +62,54 @@ export default function App() {
       setLoading(true);
       const client = getClient();
       console.log('Fetching claims from contract...');
+      
+      // Fetch a larger range to ensure we don't miss new claims
       const result = await client.readContract({
         address: CONTRACT_ADDRESS as `0x${string}`,
         functionName: 'get_claims_paginated',
-        args: [0, 10]
+        args: [0, 50]
       });
-      console.log('Fetch result:', result);
-      const fetchedClaims = (result as Claim[]) || [];
-      setClaims(fetchedClaims);
+      
+      console.log('Raw Fetch result:', result);
+      
+      let fetchedClaims: Claim[] = [];
+      if (Array.isArray(result)) {
+        fetchedClaims = result;
+      } else if (result && typeof result === 'object' && 'claims' in result && Array.isArray((result as any).claims)) {
+        fetchedClaims = (result as any).claims;
+      } else if (result && typeof result === 'object' && 'data' in result && Array.isArray((result as any).data)) {
+        fetchedClaims = (result as any).data;
+      }
+
+      // Sort by ID descending (assuming numeric IDs) to show newest first
+      const sortedClaims = [...fetchedClaims].sort((a, b) => {
+        const idA = parseInt(a.id) || 0;
+        const idB = parseInt(b.id) || 0;
+        return idB - idA;
+      });
+
+      setClaims(sortedClaims);
       setLastUpdated(new Date());
       setNodeError(false);
       
       // Clear pending claims that have now been indexed
-      if (fetchedClaims.length > 0) {
-        setPendingClaims(prev => prev.filter(p => 
-          !fetchedClaims.some(c => c.content.toLowerCase().trim() === p.content?.toLowerCase()?.trim())
-        ));
+      // Using a more robust matching (submitter + partial content)
+      if (sortedClaims.length > 0) {
+        setPendingClaims(prev => prev.filter(p => {
+          const isIndexed = sortedClaims.some(c => {
+            const pContent = p.content?.toLowerCase()?.trim() || '';
+            const cContent = c.content?.toLowerCase()?.trim() || '';
+            
+            // Match if content is identical OR if one is a significant prefix of the other
+            const contentMatch = cContent === pContent || 
+                               (pContent.length > 10 && cContent.startsWith(pContent.substring(0, 20))) ||
+                               (cContent.length > 10 && pContent.startsWith(cContent.substring(0, 20)));
+            
+            const submitterMatch = c.submitter.toLowerCase() === p.submitter?.toLowerCase();
+            return contentMatch && submitterMatch;
+          });
+          return !isIndexed;
+        }));
       }
     } catch (err: any) {
       console.error('Fetch claims error:', err);
@@ -391,6 +423,14 @@ export default function App() {
                           <ExternalLink className="w-3 h-3" />
                           {claim.txHash ? 'View Transaction' : 'Check Explorer'}
                         </a>
+                        <button
+                          onClick={() => setPendingClaims(prev => prev.filter(p => p.id !== claim.id))}
+                          className="text-xs text-gray-600 hover:text-red-400 transition-colors ml-auto"
+                          title="Remove from pending list"
+                        >
+                          Clear
+                        </button>
+                      </div>
                       </div>
                     </div>
                   </div>
