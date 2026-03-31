@@ -19,12 +19,15 @@ declare global {
 export default function App() {
   const [localAccount, setLocalAccount] = useState<any>(null);
   const [claims, setClaims] = useState<Claim[]>([]);
+  const [pendingClaims, setPendingClaims] = useState<(Partial<Claim> & { txHash?: string })[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [submissionStatus, setSubmissionStatus] = useState<'idle' | 'sending' | 'consensus' | 'finalizing'>('idle');
   const [newClaimContent, setNewClaimContent] = useState('');
   const [selectedClaim, setSelectedClaim] = useState<Claim | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [nodeError, setNodeError] = useState<boolean>(false);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   // Initialize Local Wallet on mount
   useEffect(() => {
@@ -65,11 +68,22 @@ export default function App() {
         args: [0, 10]
       });
       console.log('Fetch result:', result);
-      setClaims((result as Claim[]) || []);
+      const fetchedClaims = (result as Claim[]) || [];
+      setClaims(fetchedClaims);
+      setLastUpdated(new Date());
+      setNodeError(false);
+      
+      // Clear pending claims that have now been indexed
+      if (fetchedClaims.length > 0) {
+        setPendingClaims(prev => prev.filter(p => 
+          !fetchedClaims.some(c => c.content === p.content)
+        ));
+      }
     } catch (err: any) {
       console.error('Fetch claims error:', err);
       // If it's a "contract state" error, it might be transient or gas related
       if (err.message && err.message.includes('state')) {
+        setNodeError(true);
         setError('Note: The GenLayer node is currently having trouble reading the contract state. Your claims are safe on-chain, but might not display here immediately.');
       }
     } finally {
@@ -86,12 +100,23 @@ export default function App() {
     if (!localAccount || !newClaimContent.trim()) return;
 
     const contentToSubmit = newClaimContent.trim();
+    const tempId = `pending-${Date.now()}`;
 
     try {
       setSubmitting(true);
       setSubmissionStatus('sending');
       setError(null);
       
+      // Add to local pending list immediately
+      setPendingClaims(prev => [{
+        id: tempId,
+        content: contentToSubmit,
+        submitter: localAccount.address,
+        is_checked: false,
+        verdict: null,
+        txHash: '' // Will update once we have it
+      }, ...prev]);
+
       console.log('Submitting claim:', contentToSubmit);
       const client = getClient();
       
@@ -104,15 +129,15 @@ export default function App() {
       });
       
       console.log('Transaction hash received:', txHash);
+      setPendingClaims(prev => prev.map(c => c.id === tempId ? { ...c, txHash } : c));
       setSubmissionStatus('consensus');
       
       // 2. Wait for transaction receipt
-      // AI Consensus happens DURING this wait because it's submit_and_verify
       console.log('Waiting for AI consensus and transaction receipt...');
       const receipt = await client.waitForTransactionReceipt({ 
         hash: txHash,
         interval: 3000,
-        retries: 60 // Wait up to 3 minutes for AI consensus
+        retries: 80 // Increased to 4 minutes
       });
       
       console.log('Transaction receipt received:', receipt);
@@ -128,12 +153,12 @@ export default function App() {
       if (isSuccess) {
         console.log('Transaction confirmed as successful!');
         setNewClaimContent('');
-        // Wait a bit before fetching to allow indexing
+        // We don't clear pending here anymore; fetchClaims will handle it
+        // by comparing IDs, or we'll clear it after a long timeout
         setTimeout(() => fetchClaims(), 2000);
+        setTimeout(() => fetchClaims(), 10000); // Second attempt
       } else {
         console.warn('Transaction status check failed, but receipt was received. Status:', receipt.status);
-        // If we have a receipt at all, let's try to fetch anyway instead of throwing immediately
-        // unless it's explicitly a failure
         if (receipt.status === 'reverted' || (receipt as any).status === 0 || (receipt as any).status === 'FAILURE') {
           throw new Error('Transaction explicitly reverted on-chain. The AI models might have failed to reach consensus.');
         }
@@ -144,6 +169,11 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Submission error details:', err);
+      // Only remove if it's a hard rejection/revert
+      if (err.message?.includes('rejected') || err.message?.includes('reverted')) {
+        setPendingClaims([]);
+      }
+      
       let errorMessage = 'Failed to verify claim.';
       
       // Check if it's a timeout but the tx might still be processing
@@ -279,20 +309,35 @@ export default function App() {
         {/* Dashboard / Claims List */}
         <section>
           <div className="flex items-center justify-between mb-8">
-            <h2 className="text-xl font-semibold flex items-center gap-2">
-              Recent Verifications
-              <span className="px-2 py-0.5 rounded-full bg-white/5 text-xs text-gray-500 border border-white/5">
-                {claims.length}
-              </span>
-            </h2>
-            <button 
-              onClick={fetchClaims}
-              disabled={loading}
-              className="flex items-center gap-2 text-sm text-gray-500 hover:text-emerald-400 transition-colors disabled:opacity-50"
-            >
-              <Loader2 className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
-              {loading ? 'Refreshing...' : 'Refresh List'}
-            </button>
+            <div className="flex flex-col gap-1">
+              <h2 className="text-xl font-semibold flex items-center gap-2">
+                Recent Verifications
+                <span className="px-2 py-0.5 rounded-full bg-white/5 text-xs text-gray-500 border border-white/5">
+                  {claims.length}
+                </span>
+              </h2>
+              {lastUpdated && (
+                <span className="text-[10px] text-gray-600 uppercase tracking-widest">
+                  Last synced: {lastUpdated.toLocaleTimeString()}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-4">
+              {nodeError && (
+                <div className="flex items-center gap-1.5 text-xs text-amber-500/80 bg-amber-500/10 px-2 py-1 rounded-md border border-amber-500/20">
+                  <AlertCircle className="w-3 h-3" />
+                  Node Sync Issue
+                </div>
+              )}
+              <button 
+                onClick={fetchClaims}
+                disabled={loading}
+                className="flex items-center gap-2 text-sm text-gray-500 hover:text-emerald-400 transition-colors disabled:opacity-50"
+              >
+                <Loader2 className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
+                {loading ? 'Refreshing...' : 'Refresh List'}
+              </button>
+            </div>
           </div>
 
           {loading ? (
@@ -300,15 +345,16 @@ export default function App() {
               <Loader2 className="w-8 h-8 text-emerald-500 animate-spin" />
               <p className="text-gray-500 animate-pulse">Loading claims from GenLayer...</p>
             </div>
-          ) : (claims.length === 0 && !submitting) ? (
+          ) : (claims.length === 0 && pendingClaims.length === 0 && !submitting) ? (
             <div className="text-center py-20 border border-dashed border-white/10 rounded-3xl">
               <p className="text-gray-500">No claims verified yet. Be the first!</p>
             </div>
           ) : (
             <div className="grid gap-4">
-              {/* Show current submission if active */}
-              {submitting && (
+              {/* Show local pending claims */}
+              {pendingClaims.map((claim) => (
                 <motion.div
+                  key={claim.id}
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
                   className="group bg-white/5 border border-emerald-500/30 rounded-2xl p-6 relative overflow-hidden"
@@ -316,30 +362,36 @@ export default function App() {
                   <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                     <div className="flex-1">
                       <p className="text-lg font-medium line-clamp-1 mb-2 text-emerald-400/80">
-                        {newClaimContent}
+                        {claim.content}
                       </p>
                       <div className="flex items-center gap-3">
                         <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold border text-emerald-400 bg-emerald-400/10 border-emerald-400/20">
                           <Loader2 className="w-3 h-3 animate-spin" />
-                          {submissionStatus === 'sending' && 'Initializing...'}
-                          {submissionStatus === 'consensus' && 'AI Consensus (30-60s)...'}
-                          {submissionStatus === 'finalizing' && 'Updating Ledger...'}
+                          {submitting ? (
+                            <>
+                              {submissionStatus === 'sending' && 'Initializing...'}
+                              {submissionStatus === 'consensus' && 'AI Consensus (30-60s)...'}
+                              {submissionStatus === 'finalizing' && 'Updating Ledger...'}
+                            </>
+                          ) : (
+                            'Awaiting Indexing...'
+                          )}
                         </span>
                         <a 
-                          href={`https://explorer-studio.genlayer.com/transactions`}
+                          href={claim.txHash ? `https://explorer-studio.genlayer.com/transactions/${claim.txHash}` : `https://explorer-studio.genlayer.com/transactions`}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="text-xs text-gray-500 hover:text-emerald-400 flex items-center gap-1 transition-colors"
                         >
                           <ExternalLink className="w-3 h-3" />
-                          Check Explorer
+                          {claim.txHash ? 'View Transaction' : 'Check Explorer'}
                         </a>
                       </div>
                     </div>
                   </div>
                   <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/5 to-transparent pointer-events-none" />
                 </motion.div>
-              )}
+              ))}
 
               {/* Show verified claims */}
               {claims.map((claim) => (
